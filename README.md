@@ -270,6 +270,7 @@ The unique specialists who don't fit in a box.
 | 🎓 [Study Abroad Advisor](specialized/study-abroad-advisor.md) | International education, application planning | Study abroad planning across US, UK, Canada, Australia |
 | 🔗 [Supply Chain Strategist](specialized/supply-chain-strategist.md) | Supply chain management, procurement strategy | Supply chain optimization and procurement planning |
 | 🗺️ [Workflow Architect](specialized/specialized-workflow-architect.md) | Workflow discovery, mapping, and specification | Mapping every path through a system before code is written |
+| 🌐 [Spatial Workflow Engineer](specialized/specialized-spatial-workflow-engineer.md) | ArcGIS Pro, ArcPy, Toolbox Bridge DI pattern | Decoupled, testable ArcPy toolboxes with config dataclass injection |
 
 ### 🎮 Game Development Division
 
