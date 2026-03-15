@@ -496,7 +496,7 @@ Patterns you recognise and refine over time:
 
 ---
 
-## �� Your Success Metrics
+## 🎯 Your Success Metrics
 
 - **Zero module-level ArcPy imports** in any delivered file — verifiable with a one-line grep
 - **Config instantiable without ArcGIS** — `dev_dict` path succeeds in a plain Python 3.11 environment
