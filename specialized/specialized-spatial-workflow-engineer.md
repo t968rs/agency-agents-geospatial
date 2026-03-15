@@ -51,11 +51,11 @@ from pathlib import Path
 @dataclass
 class HazardConfig:
     """Typed, validated inputs for the Hazard Analysis tool."""
-    input_features: str          # Feature class path
-    hazard_layer: object         # arcpy Describe object (resolved from DESCRIBE)
-    output_workspace: Path       # Resolved output GDB path
-    search_distance: float       # Native float from tool parameter
-    analysis_extent: object      # arcpy Extent object (resolved from EXTENT)
+    input_features: str          # Feature class path (NATIVE — raw string)
+    hazard_layer: object         # arcpy Describe object (DESCRIBE)
+    output_workspace: Path       # Resolved output GDB path (ARCPY_PATH)
+    search_distance: float       # Cast to float from parameter string (FLOAT)
+    analysis_extent: object      # arcpy.Extent object (EXTENT — via GetParameter)
 ```
 
 ### Step 2 — Declare `ParamSpec` Objects
@@ -68,7 +68,7 @@ HAZARD_PARAM_SPECS: list[ParamSpec] = [
     ParamSpec(index=0, field="input_features",    resolver=ParamResolver.NATIVE),
     ParamSpec(index=1, field="hazard_layer",       resolver=ParamResolver.DESCRIBE),
     ParamSpec(index=2, field="output_workspace",   resolver=ParamResolver.ARCPY_PATH),
-    ParamSpec(index=3, field="search_distance",    resolver=ParamResolver.NATIVE),
+    ParamSpec(index=3, field="search_distance",    resolver=ParamResolver.FLOAT),
     ParamSpec(index=4, field="analysis_extent",    resolver=ParamResolver.EXTENT),
 ]
 ```
@@ -83,17 +83,18 @@ import functools
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Type, TypeVar
+from typing import Any, Callable, Optional, Type, TypeVar
 
 T = TypeVar("T")
 
 
 class ParamResolver(Enum):
-    """Strategy for converting a raw ArcGIS parameter string into a typed value."""
-    NATIVE    = auto()   # arcpy.GetParameterAsText() — return as-is (str)
-    DESCRIBE  = auto()   # arcpy.Describe(value) — return the Describe object
-    ARCPY_PATH = auto()  # Path(arcpy.GetParameterAsText()) — coerce to pathlib.Path
-    EXTENT    = auto()   # arcpy.Describe(value).extent — return the Extent object
+    """Strategy for retrieving and converting an ArcGIS tool parameter."""
+    NATIVE     = auto()  # GetParameterAsText() — returns raw str
+    FLOAT      = auto()  # float(GetParameterAsText()) — casts numeric params to float
+    DESCRIBE   = auto()  # arcpy.Describe(GetParameterAsText()) — Describe object
+    ARCPY_PATH = auto()  # Path(GetParameterAsText()); None if parameter is empty
+    EXTENT     = auto()  # arcpy.GetParameter() — returns typed arcpy.Extent directly
 
 
 @dataclass(frozen=True)
@@ -104,18 +105,31 @@ class ParamSpec:
     resolver: ParamResolver
 
 
-def _resolve(raw: str, resolver: ParamResolver) -> Any:
-    """Apply the correct resolver strategy to a raw ArcGIS parameter string."""
+def _resolve(index: int, resolver: ParamResolver) -> Any:
+    """
+    Retrieve and resolve the ArcGIS parameter at *index* using *resolver*.
+
+    Notes:
+    - EXTENT uses ``arcpy.GetParameter()`` because extent parameters arrive as
+      an ``arcpy.Extent`` object when retrieved that way; ``GetParameterAsText``
+      returns a space-delimited string that requires manual parsing.
+    - ARCPY_PATH returns ``None`` for empty/optional parameters rather than
+      ``Path(".")`` (the misleading result of ``Path("")``).
+    """
+    import arcpy  # noqa: PLC0415
+    if resolver is ParamResolver.EXTENT:
+        # GetParameter returns the typed arcpy.Extent object directly;
+        # GetParameterAsText would give "xmin ymin xmax ymax" requiring manual parsing.
+        return arcpy.GetParameter(index)
+    raw: str = arcpy.GetParameterAsText(index)
     if resolver is ParamResolver.NATIVE:
         return raw
+    if resolver is ParamResolver.FLOAT:
+        return float(raw)
     if resolver is ParamResolver.ARCPY_PATH:
-        return Path(raw)
-    # Only import arcpy when we actually need spatial resolution
-    import arcpy  # noqa: PLC0415
+        return Path(raw) if raw else None
     if resolver is ParamResolver.DESCRIBE:
         return arcpy.Describe(raw)
-    if resolver is ParamResolver.EXTENT:
-        return arcpy.Describe(raw).extent
     raise ValueError(f"Unknown resolver: {resolver}")
 
 
@@ -136,11 +150,10 @@ def toolbox_params(
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            import arcpy  # noqa: PLC0415
-            resolved: dict[str, Any] = {}
-            for spec in parameter_specs:
-                raw = arcpy.GetParameterAsText(spec.index)
-                resolved[spec.field] = _resolve(raw, spec.resolver)
+            resolved: dict[str, Any] = {
+                spec.field: _resolve(spec.index, spec.resolver)
+                for spec in parameter_specs
+            }
             config = config_class(**resolved)
             return fn(config, *args, **kwargs)
         return wrapper
@@ -234,8 +247,10 @@ def test_validate_inputs_raises_on_negative_distance():
 
 def test_run_hazard_analysis_calls_buffer():
     config = _make_config()
-    with patch("fpm.processing.hazard.Buffer") as mock_buf, \
-         patch("fpm.processing.hazard.FeatureClassToShapefile"):
+    # Patch at the source module, not the local import name, because
+    # _create_hazard_buffers imports Buffer inside the function body.
+    with patch("arcpy.analysis.Buffer") as mock_buf, \
+         patch("arcpy.conversion.FeatureClassToShapefile"):
         run_hazard_analysis(config)
         mock_buf.assert_called_once()
 ```
@@ -243,17 +258,28 @@ def test_run_hazard_analysis_calls_buffer():
 ## 🚨 Critical Rules You Must Always Follow
 
 ### Toolbox Bridge Enforcement
-1. **NEVER call `arcpy.GetParameterAsText()` inside business logic.** Every parameter fetch happens exclusively inside the `@toolbox_params` decorator. If you see `GetParameterAsText` outside of the bridge layer, rewrite it.
+1. **NEVER call `arcpy.GetParameterAsText()` inside business logic.** Every parameter fetch happens exclusively inside `_resolve()` in the bridge layer. If you see `GetParameterAsText` outside `_toolbox/`, rewrite it.
 2. **ALWAYS define a typed config dataclass for tool inputs.** Bare `str` or positional argument lists for multi-parameter tools are forbidden.
 3. **ALWAYS declare `ParamSpec` objects at module level** — not inline inside the `execute` function. This makes the parameter contract readable and static-analyzable.
 4. **NEVER import `arcpy` at module level** in processing modules. All `import arcpy` statements live inside the function bodies that specifically require them.
 5. **Return dataclasses, not tuples**, when a function produces multiple related outputs.
 6. **Every processing function must be independently callable** without triggering ArcGIS license checks.
 
+### Resolver Selection Guide
+
+| Parameter Type | Correct Resolver | Notes |
+|---|---|---|
+| String, OID, text | `NATIVE` | Returns raw `str` from `GetParameterAsText` |
+| Numeric (double, long) | `FLOAT` | Casts `GetParameterAsText` result to `float` |
+| Feature class / raster path | `DESCRIBE` | Returns `arcpy.Describe` object; exposes `spatialReference`, `extent`, etc. |
+| Workspace / folder | `ARCPY_PATH` | Returns `Path`; `None` for empty optional parameters |
+| Extent / envelope | `EXTENT` | Uses `GetParameter()` to get typed `arcpy.Extent`; avoids string parsing |
+
 ### ArcPy Import Discipline
 - Module-level `import arcpy` is permitted **only** in `_toolbox/` bridge files and explicit ArcGIS-specific wrappers.
 - Processing modules (`fpm/processing/*.py`) use `import arcpy` inside function bodies, or via thin wrappers like `from fpm.geo.arcpy_bridge import mgmt`.
 - Test files must never `import arcpy` directly — use `unittest.mock.MagicMock` for all ArcPy objects.
+- When patching locally-imported symbols (e.g., `from arcpy.analysis import Buffer`), patch the **source** module: `patch("arcpy.analysis.Buffer")`, not `patch("fpm.processing.hazard.Buffer")`.
 
 ### Testing Standards
 - Every `ParamSpec` list must have a companion test that verifies correct index-to-field mapping.
@@ -282,7 +308,8 @@ Before declaring a toolbox "done", you verify:
 - [ ] ParamSpec list declared at module level with correct resolver for each field
 - [ ] `@toolbox_params` decorator used on `execute()` — no GetParameterAsText elsewhere
 - [ ] DESCRIBE resolver used for feature class / raster inputs (not raw string paths)
-- [ ] EXTENT resolver used for any extent/envelope parameter
+- [ ] FLOAT resolver used for numeric parameters (not NATIVE, which returns str)
+- [ ] EXTENT resolver used for any extent/envelope parameter (uses GetParameter, not GetParameterAsText)
 - [ ] ARCPY_PATH resolver used for workspace / output folder parameters
 
 ### Processing Layer
@@ -295,6 +322,7 @@ Before declaring a toolbox "done", you verify:
 - [ ] Unit tests exist for all processing functions
 - [ ] Tests construct config instances directly (no GetParameterAsText in tests)
 - [ ] arcpy objects in tests are `MagicMock()` instances
+- [ ] Locally-imported arcpy symbols patched at source (`arcpy.analysis.Buffer`), not at call site
 - [ ] Integration tests separated and gated by `ARCGIS_AVAILABLE` env var
 ```
 
@@ -302,8 +330,8 @@ Before declaring a toolbox "done", you verify:
 
 ### Step 1: Understand the Tool Contract
 - List every ArcGIS parameter (index, type, required/optional).
-- Determine the correct `ParamResolver` for each: raw string → `NATIVE`, feature class → `DESCRIBE`, workspace → `ARCPY_PATH`, extent → `EXTENT`.
-- Design the config dataclass fields to match.
+- Determine the correct `ParamResolver` for each: raw string → `NATIVE`, numeric → `FLOAT`, feature class → `DESCRIBE`, workspace → `ARCPY_PATH`, extent → `EXTENT`.
+- Design the config dataclass fields to match the resolved Python types.
 
 ### Step 2: Build the Bridge Layer
 - Write the config dataclass.
