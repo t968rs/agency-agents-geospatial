@@ -51,11 +51,11 @@ from pathlib import Path
 @dataclass
 class HazardConfig:
     """Typed, validated inputs for the Hazard Analysis tool."""
-    input_features: str          # Feature class path (NATIVE — raw string)
-    hazard_layer: object         # arcpy Describe object (DESCRIBE)
-    output_workspace: Path       # Resolved output GDB path (ARCPY_PATH)
-    search_distance: float       # Cast to float from parameter string (FLOAT)
-    analysis_extent: object      # arcpy.Extent object (EXTENT — via GetParameter)
+    input_features: str           # Feature class path (NATIVE — raw string)
+    hazard_layer: object          # arcpy Describe object (DESCRIBE)
+    output_workspace: Path | None # Output GDB path, or None if optional param is empty (ARCPY_PATH)
+    search_distance: float        # Native Python float via GetParameter() (FLOAT)
+    analysis_extent: object       # arcpy.Extent object via GetParameter() (EXTENT)
 ```
 
 ### Step 2 — Declare `ParamSpec` Objects
@@ -91,7 +91,7 @@ T = TypeVar("T")
 class ParamResolver(Enum):
     """Strategy for retrieving and converting an ArcGIS tool parameter."""
     NATIVE     = auto()  # GetParameterAsText() — returns raw str
-    FLOAT      = auto()  # float(GetParameterAsText()) — casts numeric params to float
+    FLOAT      = auto()  # arcpy.GetParameter() — returns native Python float directly
     DESCRIBE   = auto()  # arcpy.Describe(GetParameterAsText()) — Describe object
     ARCPY_PATH = auto()  # Path(GetParameterAsText()); None if parameter is empty
     EXTENT     = auto()  # arcpy.GetParameter() — returns typed arcpy.Extent directly
@@ -110,22 +110,36 @@ def _resolve(index: int, resolver: ParamResolver) -> Any:
     Retrieve and resolve the ArcGIS parameter at *index* using *resolver*.
 
     Notes:
+    - FLOAT uses ``arcpy.GetParameter()`` so ArcGIS returns a native Python
+      ``float`` directly, bypassing the text-to-float cast entirely.
+      ``arcpy_bridge.get(index)`` is a thin proxy used in production to keep
+      the raw ``arcpy`` import in one place.
     - EXTENT uses ``arcpy.GetParameter()`` because extent parameters arrive as
-      an ``arcpy.Extent`` object when retrieved that way; ``GetParameterAsText``
-      returns a space-delimited string that requires manual parsing.
+      a typed ``arcpy.Extent`` object when retrieved that way.
+      ``GetParameterAsText`` returns a space-delimited string
+      (``"xmin ymin xmax ymax"``) that would require manual parsing:
+          raw = arcpy.GetParameterAsText(index)
+          xmin, ymin, xmax, ymax = map(float, raw.split())
+          extent = arcpy.Extent(xmin, ymin, xmax, ymax)
+      Prefer ``GetParameter()`` to avoid that fragile parsing.
     - ARCPY_PATH returns ``None`` for empty/optional parameters rather than
       ``Path(".")`` (the misleading result of ``Path("")``).
     """
     import arcpy  # noqa: PLC0415
+    if resolver is ParamResolver.FLOAT:
+        # arcpy.GetParameter() returns the native Python type (float) directly;
+        # avoids the fragile float(GetParameterAsText()) text-round-trip.
+        return arcpy.GetParameter(index)
     if resolver is ParamResolver.EXTENT:
-        # GetParameter returns the typed arcpy.Extent object directly;
-        # GetParameterAsText would give "xmin ymin xmax ymax" requiring manual parsing.
+        # GetParameter returns the typed arcpy.Extent object directly.
+        # Alternative via text (for reference only — prefer GetParameter):
+        #   raw = arcpy.GetParameterAsText(index)  # → "xmin ymin xmax ymax"
+        #   xmin, ymin, xmax, ymax = map(float, raw.split())
+        #   return arcpy.Extent(xmin, ymin, xmax, ymax)
         return arcpy.GetParameter(index)
     raw: str = arcpy.GetParameterAsText(index)
     if resolver is ParamResolver.NATIVE:
         return raw
-    if resolver is ParamResolver.FLOAT:
-        return float(raw)
     if resolver is ParamResolver.ARCPY_PATH:
         return Path(raw) if raw else None
     if resolver is ParamResolver.DESCRIBE:
@@ -270,10 +284,10 @@ def test_run_hazard_analysis_calls_buffer():
 | Parameter Type | Correct Resolver | Notes |
 |---|---|---|
 | String, OID, text | `NATIVE` | Returns raw `str` from `GetParameterAsText` |
-| Numeric (double, long) | `FLOAT` | Casts `GetParameterAsText` result to `float` |
+| Numeric (double, long) | `FLOAT` | `GetParameter()` returns native Python `float` directly — no text-cast needed |
 | Feature class / raster path | `DESCRIBE` | Returns `arcpy.Describe` object; exposes `spatialReference`, `extent`, etc. |
-| Workspace / folder | `ARCPY_PATH` | Returns `Path`; `None` for empty optional parameters |
-| Extent / envelope | `EXTENT` | Uses `GetParameter()` to get typed `arcpy.Extent`; avoids string parsing |
+| Workspace / folder | `ARCPY_PATH` | Returns `Path`; `None` for empty optional parameters (avoids `Path("") → "."`) |
+| Extent / envelope | `EXTENT` | `GetParameter()` returns typed `arcpy.Extent`; `GetParameterAsText` gives `"xmin ymin xmax ymax"` string requiring manual parse |
 
 ### ArcPy Import Discipline
 - Module-level `import arcpy` is permitted **only** in `_toolbox/` bridge files and explicit ArcGIS-specific wrappers.
