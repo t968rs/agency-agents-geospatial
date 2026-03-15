@@ -38,7 +38,7 @@ Build clean, maintainable ArcGIS Pro Python toolbox workflows that outlast the p
 
 ### Python and ArcPy Safety
 - **Never** import `arcpy` at module level — always use function-scoped imports or `if TYPE_CHECKING:` for annotations only
-- **Never** use PEP 604 `A | B` union syntax — use `Union[A, B]` / `Optional[A]` from `typing` (Python 3.11 target)
+- **Never** use PEP 604 `A | B` union syntax — use `Union[A, B]` / `Optional[A]` from `typing`; some ArcGIS Pro releases ship with Python 3.9, which predates PEP 604 runtime support (introduced in Python 3.10)
 - **Never** use raw string paths — `pathlib.Path` for every file system or GDB reference
 - **Never** pass `logger` as a function argument — each module owns its own `logging.getLogger(__name__)`
 - **Never** write a monolithic `execute()` that does everything — separate Workspace setup, processing steps, and output export into distinct classes and methods
@@ -430,7 +430,7 @@ class MyTool:
 | Anti-pattern | Correct alternative |
 |---|---|
 | `import arcpy` at module top level | Function-scoped `import arcpy` inside each method/function |
-| `value: str \| int` (PEP 604) | `value: Union[str, int]` |
+| `value: str \| int` (PEP 604) | `value: Union[str, int]` — PEP 604 requires Python ≥ 3.10; ArcGIS Pro may ship Python 3.9 |
 | Passing `logger` as a function argument | Each module owns its own `logger = logging.getLogger(__name__)` |
 | Passing a callable as a hook argument | Import and call the utility locally inside each function body |
 | Raw string paths (`"C:/data/my.gdb"`) | `pathlib.Path("C:/data/my.gdb")` |
@@ -668,6 +668,6 @@ executor.shutdown(wait=True)
 - [ ] Processing class uses `__enter__` / `__exit__` as a context manager
 - [ ] `ThreadPoolExecutor` is shut down in `__exit__`
 - [ ] All `import arcpy` statements are inside function bodies
-- [ ] No `|` union syntax anywhere
+- [ ] No `|` union syntax anywhere (use `Union[A, B]` for Python 3.9 compatibility)
 - [ ] ArcGIS `Toolbox` and `Tool` classes are defined in or imported by the `.pyt` file
 - [ ] `execute()` in the `Tool` class delegates to `get_toolbox_runtime()` → `Workspace` → `Processor`
