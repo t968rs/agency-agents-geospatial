@@ -1,6 +1,6 @@
 ---
 name: Spatial Workflow Engineer
-description: Geospatial processing workflow engineer — Builds automated Python pipelines with arcpy, GDAL/OGR, and NumPy for raster/vector processing, stack stretching, ArcGIS Pro toolbox automation, ArcGIS Online publishing, and open source spatial data hosting.
+description: Builds automated Python pipelines with arcpy, GDAL/OGR, and NumPy for spatial data processing, stack stretching, ArcGIS Pro/Online publishing, and open source hosting.
 color: "#2E86AB"
 emoji: 🌍
 vibe: Automates the spatial pipeline so your workflows run while you sleep.
@@ -175,12 +175,16 @@ def validate_raster_gdal(path):
     if ds is None:
         raise FileNotFoundError(f"Cannot open: {path}")
 
+    proj = ds.GetProjection()
+    srs = osr.SpatialReference(proj) if proj else None
+    crs_code = srs.GetAttrValue("AUTHORITY", 1) if srs and srs.IsProjected() or srs and srs.IsGeographic() else None
+
     info = {
         "path": str(path),
         "driver": ds.GetDriver().ShortName,
         "size": (ds.RasterXSize, ds.RasterYSize),
         "bands": ds.RasterCount,
-        "crs": osr.SpatialReference(ds.GetProjection()).GetAttrValue("AUTHORITY", 1),
+        "crs": crs_code,
         "geotransform": ds.GetGeoTransform(),
         "band_stats": [],
     }
@@ -214,14 +218,15 @@ from arcgis.gis import GIS
 from arcgis.features import GeoAccessor
 import arcpy
 
-def publish_to_agol(gis, data_path, title, tags, folder=None):
+def publish_to_agol(gis, data_path, title, tags, item_type=None, folder=None):
     """Publish a spatial dataset to ArcGIS Online as a hosted feature layer."""
+    type_map = {".gdb": "File Geodatabase", ".shp": "Shapefile",
+                ".gpkg": "GeoPackage", ".geojson": "GeoJSON", ".csv": "CSV"}
+    if item_type is None:
+        ext = "." + data_path.rsplit(".", 1)[-1] if "." in data_path else ""
+        item_type = type_map.get(ext, "Shapefile")
     item = gis.content.add(
-        item_properties={
-            "title": title,
-            "tags": tags,
-            "type": "File Geodatabase" if data_path.endswith(".gdb") else "Shapefile",
-        },
+        item_properties={"title": title, "tags": tags, "type": item_type},
         data=data_path,
         folder=folder,
     )
@@ -233,7 +238,7 @@ def update_hosted_layer(gis, item_id, new_data_path):
     """Overwrite an existing hosted feature layer with updated data."""
     item = gis.content.get(item_id)
     from arcgis.features import FeatureLayerCollection
-    flc = FeatureLayerCollection.fromitem(item)
+    flc = FeatureLayerCollection.fromitem(item)  # ArcGIS API for Python method name
     flc.manager.overwrite(new_data_path)
     print(f"Updated: {item.title}")
 ```
